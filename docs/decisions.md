@@ -14,3 +14,10 @@
 - Created explicit binary label column `label_churn`.
 - Enforced uniqueness and non-null constraint on `customerID`.
 - Deferred categorical encoding to Gold layer.
+
+## Batch Inference Deployment
+
+- Deployed champion Random Forest model as a batch scoring job.
+- Scored all customers and wrote predictions to a governed Gold Delta table.
+- Included model name, version, and scoring timestamp for traceability.
+- Designed pipeline to be schedulable via Databricks Jobs.
