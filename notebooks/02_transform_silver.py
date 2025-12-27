@@ -4,72 +4,80 @@
 
 from pyspark.sql import functions as F
 
+# -----------------------------
+# Config
+# -----------------------------
 CATALOG = "end_to_end_churn"
 SCHEMA = "churn_analytics"
 
 BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.telco_bronze"
 SILVER_TABLE = f"{CATALOG}.{SCHEMA}.telco_silver"
 
-print("BRONZE_TABLE:", BRONZE_TABLE)
-print("SILVER_TABLE:", SILVER_TABLE)
-
 df = spark.table(BRONZE_TABLE)
 
 print("Bronze row count:", df.count())
 
 # -----------------------------
-# 1) Basic standardization
+# 1) Trim all string columns
 # -----------------------------
-
-# Trim all string columns to remove hidden spaces
 string_cols = [c for c, t in df.dtypes if t == "string"]
+
 for c in string_cols:
     df = df.withColumn(c, F.trim(F.col(c)))
 
-# Clean TotalCharges: dataset has blanks for some customers (often tenure=0)
+# -----------------------------
+# 2) Fix TotalCharges (string -> double)
+# -----------------------------
 df = df.withColumn(
     "TotalCharges",
-    F.when((F.col("TotalCharges").isNull()) | (F.col("TotalCharges") == ""), None).otherwise(F.col("TotalCharges"))
+    F.when(
+        (F.col("TotalCharges").isNull()) | (F.col("TotalCharges") == ""),
+        None
+    ).otherwise(F.col("TotalCharges"))
 )
 
 df = df.withColumn("TotalCharges", F.col("TotalCharges").cast("double"))
 
-# Standardize SeniorCitizen to 0/1 int (already int, but keep explicit)
-df = df.withColumn("SeniorCitizen", F.col("SeniorCitizen").cast("int"))
-
-# Standardize Churn to label_churn (0/1)
+# -----------------------------
+# 3) Explicit label column
+# -----------------------------
 df = df.withColumn(
     "label_churn",
     F.when(F.lower(F.col("Churn")) == "yes", F.lit(1)).otherwise(F.lit(0))
 )
 
-# Drop duplicates by customerID (shouldn’t exist, but we enforce)
+# -----------------------------
+# 4) Deduplication & key enforcement
+# -----------------------------
 df = df.dropDuplicates(["customerID"])
 
 # -----------------------------
-# 2) Data quality checks (light but real)
+# 5) Data quality checks
 # -----------------------------
 n_rows = df.count()
 n_customers = df.select("customerID").distinct().count()
-null_key = df.filter(F.col("customerID").isNull() | (F.col("customerID") == "")).count()
+
+null_customer_id = df.filter(
+    F.col("customerID").isNull() | (F.col("customerID") == "")
+).count()
+
 null_label = df.filter(F.col("label_churn").isNull()).count()
 
-print("---- Data Quality ----")
-print("Rows:", n_rows)
-print("Distinct customerID:", n_customers)
-print("Null/blank customerID:", null_key)
-print("Null label_churn:", null_label)
-
-# TotalCharges null rate (expected some nulls when tenure=0)
 totalcharges_nulls = df.filter(F.col("TotalCharges").isNull()).count()
-print("TotalCharges nulls:", totalcharges_nulls, f"({totalcharges_nulls/n_rows:.2%})")
 
-# If you want to enforce “must-have” rules, keep them as asserts (job-style)
-assert null_key == 0, "customerID has null/blank values — investigate bronze ingestion/source"
-assert null_label == 0, "label_churn has null values — investigate churn parsing"
+print("---- Data Quality Report ----")
+print(f"Rows: {n_rows}")
+print(f"Distinct customerID: {n_customers}")
+print(f"Null/blank customerID: {null_customer_id}")
+print(f"Null label_churn: {null_label}")
+print(f"TotalCharges nulls: {totalcharges_nulls} ({totalcharges_nulls/n_rows:.2%})")
+
+# Enforce critical rules (job-style)
+assert null_customer_id == 0, "❌ customerID contains null or blank values"
+assert null_label == 0, "❌ label_churn contains null values"
 
 # -----------------------------
-# 3) Write Silver
+# 6) Write Silver Delta table
 # -----------------------------
 (
     df.write.format("delta")
@@ -77,9 +85,17 @@ assert null_label == 0, "label_churn has null values — investigate churn parsi
     .saveAsTable(SILVER_TABLE)
 )
 
-print("✅ Wrote Silver table:", SILVER_TABLE)
+print("✅ Silver table written:", SILVER_TABLE)
 
-# Quick preview
+# -----------------------------
+# 7) Preview
+# -----------------------------
 spark.table(SILVER_TABLE).select(
-    "customerID", "tenure", "MonthlyCharges", "TotalCharges", "label_churn"
+    "customerID",
+    "tenure",
+    "MonthlyCharges",
+    "TotalCharges",
+    "Contract",
+    "InternetService",
+    "label_churn"
 ).show(10, truncate=False)
